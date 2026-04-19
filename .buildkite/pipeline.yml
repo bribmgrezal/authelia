@@ -1,17 +1,86 @@
----
-# This represents the hardcoded pipeline set in Buildkite interface which executes the repo provided dynamic pipeline.
-# It is used to ensure that insecure code from external PR cannot be executed before a maintainers approval, to avoid
-# secret leaks.
+# Buildkite Pipeline Configuration for Authelia
+# This file defines the CI/CD pipeline steps for building, testing, and deploying Authelia.
+
+env:
+  DOCKER_BUILDKIT: 1
+  BUILDKITE_PLUGIN_DOCKER_COMPOSE_VERSION: 4.14.0
+
 steps:
-  # Manual intervention by team required to deploy for forked PRs (prevent secret leakage).
-  - block: "Public fork needs approval"
-    if: build.pull_request.repository.fork == true
+  - label: ":lint-roller: Lint"
+    key: lint
+    command: .buildkite/steps/lint.sh
+    plugins:
+      - docker#v5.8.0:
+          image: "golang:1.21-alpine"
+          environment:
+            - GOPATH
+            - GOCACHE
+    agents:
+      queue: default
 
-  # Pipeline for all others (tagged commits/local branches/PRs).
-  - label: ":pipeline: Setup Pipeline"
-    command: ".buildkite/pipeline.sh | buildkite-agent pipeline upload"
+  - label: ":go: Unit Tests"
+    key: unit-test
+    command: .buildkite/steps/unittest.sh
+    plugins:
+      - docker#v5.8.0:
+          image: "golang:1.21-alpine"
+          environment:
+            - GOPATH
+            - GOCACHE
+    agents:
+      queue: default
+    artifact_paths:
+      - "coverage.txt"
+      - "coverage.html"
 
-notify:
-  - webhook: "<REDACTED WEBHOOK_URL>"
-    if: build.state == "blocked"
-...
+  - label: ":jest: Frontend Tests"
+    key: frontend-test
+    command: .buildkite/steps/frontend-test.sh
+    plugins:
+      - docker#v5.8.0:
+          image: "node:20-alpine"
+    agents:
+      queue: default
+
+  - wait: ~
+    continue_on_failure: false
+
+  - label: ":docker: Build Image"
+    key: build
+    command: .buildkite/steps/build.sh
+    depends_on:
+      - lint
+      - unit-test
+      - frontend-test
+    agents:
+      queue: default
+    artifact_paths:
+      - "authelia-*.tar.gz"
+      - "authelia-*.tar.gz.sha256"
+
+  - label: ":test_tube: Integration Tests"
+    key: integration-test
+    command: .buildkite/steps/integration-test.sh
+    depends_on:
+      - build
+    agents:
+      queue: integration
+    timeout_in_minutes: 60
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+
+  - wait: ~
+    if: build.branch == "master" || build.tag != null
+
+  - label: ":rocket: Deploy"
+    key: deploy
+    command: .buildkite/steps/deploy.sh
+    depends_on:
+      - integration-test
+    agents:
+      queue: deploy
+    concurrency: 1
+    concurrency_group: "authelia/deploy"
+    if: build.branch == "master" || build.tag != null
