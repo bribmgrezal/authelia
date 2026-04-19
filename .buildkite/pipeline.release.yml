@@ -1,0 +1,50 @@
+# Release pipeline for authelia
+# Triggered on version tags (e.g., v4.x.x)
+
+env:
+  BUILDKITE_CLEAN_CHECKOUT: "true"
+
+steps:
+  - label: ":hammer: Build Release Artifacts"
+    key: build-release
+    command:
+      - "make build"
+    plugins:
+      - docker#v5.9.0:
+          image: "ghcr.io/authelia/authelia-builder:latest"
+          environment:
+            - "BUILDKITE_BUILD_NUMBER"
+            - "BUILDKITE_BRANCH"
+            - "BUILDKITE_TAG"
+    artifact_paths:
+      - "authelia-linux-amd64"
+      - "authelia-linux-arm64"
+      - "authelia-linux-arm"
+
+  - label: ":docker: Build & Push Docker Image"
+    key: docker-release
+    depends_on: build-release
+    command:
+      - "make docker-build docker-push"
+    plugins:
+      - docker-login#v2.1.0:
+          username: autheliabot
+          password-env: DOCKER_PASSWORD
+          server: ghcr.io
+    env:
+      DOCKER_BUILDKIT: "1"
+
+  - label: ":github: Publish GitHub Release"
+    key: github-release
+    depends_on:
+      - build-release
+      - docker-release
+    command:
+      - ".buildkite/scripts/github-release.sh"
+    env:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+
+  - wait
+
+  - label: ":white_check_mark: Release Complete"
+    command: echo "Release $${BUILDKITE_TAG} published successfully"
